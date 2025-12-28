@@ -1,0 +1,74 @@
+name: Build Zed (PR ref)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build (e.g. refs/pull/44827/head, main, or a commit SHA)"
+        required: true
+        default: "refs/pull/44827/head"
+
+jobs:
+  windows_build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Enable long paths (git)
+        run: git config --system core.longpaths true
+
+      - name: Checkout Zed source at ref
+        uses: actions/checkout@v4
+        with:
+          repository: zed-industries/zed
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        shell: pwsh
+        run: |
+          $env:CARGO_NET_GIT_FETCH_WITH_CLI = "true"
+          cargo build --release
+
+      - name: Package portable build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+
+          # Find the main exe (name may change across versions)
+          $exe = Get-ChildItem -Path target\release -Filter *.exe |
+            Where-Object { $_.Name -match "zed" } |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+
+          if (-not $exe) { throw "No zed*.exe found in target\release" }
+
+          $outDir = Join-Path dist "Zed-Portable"
+          New-Item -ItemType Directory -Force $outDir | Out-Null
+
+          Copy-Item $exe.FullName $outDir -Force
+
+          # Copy runtime DLLs next to exe (common for Windows builds)
+          Get-ChildItem -Path target\release -Filter *.dll -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName $outDir -Force }
+
+          # If repo has assets folder, include it (safe even if not needed)
+          if (Test-Path "assets") {
+            Copy-Item "assets" (Join-Path $outDir "assets") -Recurse -Force
+          }
+
+          # Zip
+          $zip = Join-Path dist ("zed-" + "${{ github.run_id }}" + ".zip")
+          Compress-Archive -Path $outDir -DestinationPath $zip -Force
+          "Built: $($exe.Name) => $zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-windows-pr-build
+          path: dist/*.zip
